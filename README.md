@@ -8,6 +8,12 @@ heavily inspo'd by these [MS driver samples](https://github.com/microsoft/Window
 
 ### build
 
+- install [rustup](https://rustup.rs/)
+- install the `x86_64-pc-windows-gnu` target via `rustup target add x86_64-pc-windows-gnu`
+- install [mingw-w64](https://sourceforge.net/projects/mingw-w64/)
+-- `apt install mingw-w64 gcc-mingw-w64`
+-- `dnf install mingw64-\*`
+
 ### target
 
 - install Windows SDK from [here](https://developer.microsoft.com/en-us/windows/downloads/windows-sdk/)
