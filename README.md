@@ -2,8 +2,6 @@
 
 this is for the `x86_64-pc-windows-gnu` target
 
-heavily inspo'd by these [MS driver samples](https://github.com/microsoft/Windows-driver-samples/tree/main/filesys/miniFilter)
-
 ## prerequisites
 
 ### build
@@ -68,7 +66,8 @@ cargo --release 2>&1
     New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\RustFilter" -Name "DisplayName" -Value "RustFilter" -PropertyType STRING -Force >> log.txt 2> err.txt
     New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\RustFilter" -Name "ErrorControl" -Value 1 -PropertyType DWORD -Force >> log.txt 2> err.txt
     New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\RustFilter" -Name "Group" -Value "FSFilter Activity Monitor" -PropertyType STRING -Force >> log.txt 2> err.txt
-    New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\RustFilter" -Name "ImagePath" -Value "\??\C:\path\to\filter.dll" -PropertyType STRING -Force >> log.txt 2> err.txt # !!set this!!
+    New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\RustFilter" -Name "ImagePath" -Value "\??\C:\Users\Administrator\Desktop\filter.dll" -PropertyType STRING -Force >> log.txt 2> err.txt # !!set this!!
+    New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\RustFilter" -Name "Owners" -Value "oem99.inf" -PropertyType STRING -Force >> log.txt 2> err.txt
     New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\RustFilter" -Name "Start" -Value 3 -PropertyType DWORD -Force >> log.txt 2> err.txt
     New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\RustFilter" -Name "Type" -Value 2 -PropertyType DWORD -Force >> log.txt 2> err.txt
     New-Item -Path "HKLM:\SYSTEM\CurrentControlSet\Services\RustFilter\Instances" -Force >> log.txt 2> err.txt
@@ -84,13 +83,15 @@ cargo --release 2>&1
 ```
 5. sign the driver 
 ```powershell
-    & 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool' sign /v /fd sha256 /s PrivateCertStore /n "Contoso.com(Test)" /t http://timestamp.digicert.com C:\path\to\filter.dll
+    & 'C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\signtool' sign /v /fd sha256 /s PrivateCertStore /n "Contoso.com(Test)" /t http://timestamp.digicert.com C:\Users\Administrator\Desktop\filter.dll
 ```
 6. run `fltmc load rustfilter`
 
 ## tested on
 
 - Windows Server 2022
+- Windows Server 2019
+- Windows Server 2016
 
 
 ## the real heroes
@@ -99,3 +100,4 @@ cargo --release 2>&1
 - https://myworks2012.wordpress.com/2012/10/07/how-to-compile-windows-driver-using-mingw-gcc/
 - https://not-matthias.github.io/posts/kernel-driver-with-rust/
 - https://github.com/StephanvanSchaik/windows-kernel-rs
+- https://github.com/microsoft/Windows-driver-samples/tree/main/filesys/miniFilter
