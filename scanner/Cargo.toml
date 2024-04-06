@@ -1,0 +1,24 @@
+cargo-features = ["per-package-target"]
+
+[package]
+name = "scanner"
+version = "0.1.0"
+edition = "2021"
+default-target = "x86_64-pc-windows-gnu"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[lib]
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+compiler_builtins = { version = "0.1.108", features = ["mem"] }
+
+[unstable]
+build-std = ["core", "alloc"]
+

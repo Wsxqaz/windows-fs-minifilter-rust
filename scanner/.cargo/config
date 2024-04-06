@@ -1,0 +1,20 @@
+[build]
+target = "x86_64-pc-windows-gnu"
+
+rustflags = [
+    "-C", "link-arg=-Wl,--subsystem,windows",
+    "-C", "link-arg=-Wl,--nxcompat",
+    "-C", "link-arg=-Wl,--dynamicbase",
+    "-C", "link-arg=-Wl,--image-base,0x10000",
+    "-C", "link-arg=-Wl,--file-alignment,0x1000",
+    "-C", "link-arg=-Wl,--section-alignment,0x1000",
+    "-C", "link-arg=-Wl,--stack,0x1000000",
+    "-C", "link-arg=-nostartfiles",
+    "-C", "link-arg=-nostdlib",
+    "-C", "link-arg=-Wl,-e,DriverEntry",
+    "-C", "link-arg=-Wl,--gc-sections",
+    "-C", "link-arg=-Wl,--strip-all",
+    "-C", "strip=symbols",
+    "-C", "link-arg=-DDBG",
+]
+
