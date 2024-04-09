@@ -1172,6 +1172,8 @@ impl Clone for FILE_STANDARD_INFORMATION {
         *self
     }
 }
+pub const FLTFL_IO_OPERATION_DO_NOT_UPDATE_BYTE_OFFSET: u32 = 4u32;
+pub const FLTFL_IO_OPERATION_NON_CACHED: u32 = 1u32;
 #[repr(C)]
 pub struct FLT_CALLBACK_DATA {
     pub Flags: u32,
@@ -1249,6 +1251,7 @@ impl Clone for FLT_FILE_NAME_INFORMATION {
     }
 }
 pub const FLT_FILE_NAME_NORMALIZED: u32 = 1u32;
+pub const FLT_FILE_NAME_OPENED: u32 = 2u32;
 pub const FLT_FILE_NAME_QUERY_DEFAULT: u32 = 256u32;
 #[repr(C)]
 pub struct FLT_IO_PARAMETER_BLOCK {
@@ -2082,6 +2085,7 @@ pub type FLT_POSTOP_CALLBACK_STATUS = i32;
 pub const FLT_POSTOP_FINISHED_PROCESSING: FLT_POSTOP_CALLBACK_STATUS = 0i32;
 pub type FLT_PREOP_CALLBACK_STATUS = i32;
 pub const FLT_PREOP_SUCCESS_NO_CALLBACK: FLT_PREOP_CALLBACK_STATUS = 1i32;
+pub const FLT_PREOP_SUCCESS_WITH_CALLBACK: FLT_PREOP_CALLBACK_STATUS = 0i32;
 #[repr(C)]
 pub struct FLT_REGISTRATION {
     pub Size: u16,
@@ -2123,6 +2127,8 @@ impl Clone for FLT_RELATED_OBJECTS {
         *self
     }
 }
+pub type FLT_SET_CONTEXT_OPERATION = i32;
+pub const FLT_SET_CONTEXT_REPLACE_IF_EXISTS: FLT_SET_CONTEXT_OPERATION = 0i32;
 pub const FLT_STREAMHANDLE_CONTEXT: u32 = 16u32;
 #[repr(C)]
 pub struct FLT_TAG_DATA_BUFFER {
@@ -2201,6 +2207,24 @@ impl Clone for FLT_TAG_DATA_BUFFER_0_3 {
     }
 }
 pub const FLT_TRANSACTION_CONTEXT: u32 = 32u32;
+#[repr(C)]
+pub struct FLT_VOLUME_PROPERTIES {
+    pub DeviceType: u32,
+    pub DeviceCharacteristics: u32,
+    pub DeviceObjectFlags: u32,
+    pub AlignmentRequirement: u32,
+    pub SectorSize: u16,
+    pub Flags: u16,
+    pub FileSystemDriverName: UNICODE_STRING,
+    pub FileSystemDeviceName: UNICODE_STRING,
+    pub RealDeviceName: UNICODE_STRING,
+}
+impl Copy for FLT_VOLUME_PROPERTIES {}
+impl Clone for FLT_VOLUME_PROPERTIES {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
 #[repr(C)]
 pub struct FS_FILTER_SECTION_SYNC_OUTPUT {
     pub StructureSize: u32,
@@ -3409,6 +3433,7 @@ impl Clone for KEVENT {
     }
 }
 pub type KTRANSACTION = isize;
+pub const KernelMode: MODE = 0i32;
 #[repr(C)]
 pub struct LIST_ENTRY {
     pub Flink: *mut LIST_ENTRY,
@@ -3472,6 +3497,11 @@ impl Clone for MDL {
         *self
     }
 }
+pub type MEMORY_CACHING_TYPE = i32;
+pub type MM_PAGE_PRIORITY = i32;
+pub type MODE = i32;
+pub const MdlMappingNoExecute: u32 = 1073741824u32;
+pub const MmCached: MEMORY_CACHING_TYPE = 1i32;
 #[repr(C)]
 pub struct NAMED_PIPE_CREATE_PARAMETERS {
     pub NamedPipeType: u32,
@@ -3490,6 +3520,8 @@ impl Clone for NAMED_PIPE_CREATE_PARAMETERS {
     }
 }
 pub type NTSTATUS = i32;
+pub const NonPagedPool: POOL_TYPE = 0i32;
+pub const NormalPagePriority: MM_PAGE_PRIORITY = 16i32;
 #[repr(C)]
 pub struct OBJECT_ATTRIBUTES {
     pub Length: u32,
@@ -3690,6 +3722,7 @@ pub type PSECURITY_DESCRIPTOR = *mut core::ffi::c_void;
 pub type PSID = *mut core::ffi::c_void;
 pub type PSTR = *mut u8;
 pub type PWSTR = *mut u16;
+pub const PagedPool: POOL_TYPE = 1i32;
 #[repr(C)]
 pub struct SECTION_OBJECT_POINTERS {
     pub DataSectionObject: *mut core::ffi::c_void,
@@ -3779,6 +3812,7 @@ impl Clone for SINGLE_LIST_ENTRY {
         *self
     }
 }
+pub const STATUS_ACCESS_DENIED: NTSTATUS = 0xC0000022_u32 as _;
 pub type SYSTEM_POWER_STATE = i32;
 #[repr(C)]
 pub struct SYSTEM_POWER_STATE_CONTEXT {

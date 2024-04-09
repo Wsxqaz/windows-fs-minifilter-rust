@@ -34,13 +34,15 @@ use port::{port_connect, port_disconnect};
 use write::pre_write;
 
 type PVOID = *mut core::ffi::c_void;
-type NTSTATUS = u32;
+type NTSTATUS = i32;
 type ULONG = u32;
+type LARGE_INTEGER = u64;
 
 const DrvRtPoolNxOptIn: u32 = 0x00000001;
 const NULL: PVOID = 0 as PVOID;
 const NULL_HANDLE: HANDLE = 0 as HANDLE;
 
+#[link_section = ".PAGE"]
 pub fn InitializeObjectAttributes(
     ObjectAttributes: *mut OBJECT_ATTRIBUTES,
     ObjectName: *mut UNICODE_STRING,
@@ -58,6 +60,22 @@ pub fn InitializeObjectAttributes(
     }
 }
 
+#[repr(C)]
+pub struct SCANNER_STREAM_CONTEXT {
+    rescan_req: u8,
+}
+
+struct SCANNER_NOTIFICATION {
+    bytes_to_scan: u32,
+    reserved: u32,
+    message: [u8; 1024],
+}
+
+struct SCANNER_REPLY {
+    replyLength: u32,
+    reply: [u8; 1024],
+}
+
 struct SERVER_DATA {
     client_process: PEPROCESS,
     client_port: PFLT_PORT,
@@ -65,6 +83,7 @@ struct SERVER_DATA {
     filter: PFLT_FILTER,
     server_port: PFLT_PORT,
 }
+#[link_section = ".PAGE"]
 static mut SERVER_DATA: SERVER_DATA = SERVER_DATA {
     client_process: 0,
     client_port: 0,
@@ -104,6 +123,21 @@ extern "C" {
     pub fn DbgPrint(Format: *const u8);
     pub fn IoGetCurrentProcess() -> PEPROCESS;
     pub fn IoThreadToProcess(Thread: PETHREAD) -> PEPROCESS;
+    pub fn KeDelayExecutionThread(
+        WaitMode: u8,
+        Alertable: u8,
+        Interval: *mut LARGE_INTEGER,
+    ) -> NTSTATUS;
+    pub fn ExAllocatePool(PoolType: u32, NumberOfBytes: ULONG) -> *mut core::ffi::c_void;
+    pub fn MmMapLockedPagesSpecifyCache(
+        Mdl: *mut MDL,
+        AccessMode: i32,
+        CacheType: i32,
+        RequestedAddress: PVOID,
+        BugCheckOnFailure: u8,
+        Priority: u32,
+    ) -> *mut core::ffi::c_void;
+    pub fn RtlCopyMemory(Destination: *mut core::ffi::c_void, Source: *const core::ffi::c_void, Length: usize);
 }
 
 #[link(name = "fltmgr.sys", modifiers = "+verbatim")]
@@ -132,12 +166,87 @@ extern "C" {
     pub fn FltFreeSecurityDescriptor(SecurityDescriptor: *mut SECURITY_DESCRIPTOR);
     pub fn FltGetFileNameInformation(
         Data: *mut FLT_CALLBACK_DATA,
-        NameOptions: FLT_FILE_NAME_OPTIONS,
-        NameInfo: *mut PFLT_FILE_NAME_INFORMATION,
+        NameOptions: u32,
+        NameInfo: *mut *mut FLT_FILE_NAME_INFORMATION,
     ) -> NTSTATUS;
+    pub fn FltParseFileNameInformation(NameInfo: *mut FLT_FILE_NAME_INFORMATION) -> NTSTATUS;
+    pub fn FltReleaseFileNameInformation(NameInfo: *mut FLT_FILE_NAME_INFORMATION);
+    pub fn FltGetVolumeFromInstance(Instance: PFLT_INSTANCE, Volume: *mut PFLT_VOLUME) -> NTSTATUS;
+    pub fn FltGetVolumeProperties(
+        Volume: PFLT_VOLUME,
+        Properties: *mut FLT_VOLUME_PROPERTIES,
+        Size: ULONG,
+        ReturnedLength: *mut ULONG,
+    ) -> NTSTATUS;
+    pub fn FltAllocatePoolAlignedWithTag(
+        Instance: PFLT_INSTANCE,
+        PoolType: i32,
+        NumberOfBytes: ULONG,
+        Tag: ULONG,
+    ) -> *mut core::ffi::c_void;
+    pub fn FltReadFile(
+        Instance: PFLT_INSTANCE,
+        FileObject: *mut FILE_OBJECT,
+        Offset: *mut u64,
+        Length: ULONG,
+        Buffer: *mut core::ffi::c_void,
+        Flags: ULONG,
+        BytesRead: *mut ULONG,
+        CallbackRoutine: *mut core::ffi::c_void,
+        Context: *mut core::ffi::c_void,
+    ) -> NTSTATUS;
+    pub fn FltCancelFileOpen(Instance: PFLT_INSTANCE, FileObject: *mut FILE_OBJECT);
+    pub fn FltAllocateContext(
+        Instance: PFLT_FILTER,
+        ContextType: u32,
+        Size: usize,
+        PoolType: i32,
+        Context: *mut PFLT_CONTEXT,
+    ) -> NTSTATUS;
+    pub fn FltSetStreamHandleContext(
+        Instance: PFLT_INSTANCE,
+        FileObject: *mut FILE_OBJECT,
+        Operation: FLT_SET_CONTEXT_OPERATION,
+        Context: PFLT_CONTEXT,
+        OldContext: *mut PFLT_CONTEXT,
+    ) -> NTSTATUS;
+    pub fn FltReleaseContext(Context: PFLT_CONTEXT);
+    pub fn FltGetStreamHandleContext(
+        Instance: PFLT_INSTANCE,
+        FileObject: *mut FILE_OBJECT,
+        Context: *mut PFLT_CONTEXT,
+    ) -> NTSTATUS;
+    pub fn FltSendMessage(
+        Filter: PFLT_FILTER,
+        ClientPort: *mut PFLT_PORT,
+        SenderBuffer: *mut core::ffi::c_void,
+        SenderBufferLength: ULONG,
+        ReceiverBuffer: *mut core::ffi::c_void,
+        ReceiverBufferLength: *mut ULONG,
+        Timeout: *mut u64,
+    ) -> NTSTATUS;
+
 }
 
+#[link_section = ".PAGE"]
+pub fn MmGetSystemAddressForMdlSafe(
+    Mdl: *mut MDL,
+    Priority: u32,
+) -> *mut core::ffi::c_void {
+    let mdl_flags = unsafe { (*Mdl).MdlFlags };
+    let MDL_MAPPED_TO_SYSTEM_VA = 0x0001;
+    let MDL_SOURCE_IS_NONPAGED_POOL = 0x0002;
+
+    if (unsafe { (*Mdl).MdlFlags } & (MDL_MAPPED_TO_SYSTEM_VA | MDL_SOURCE_IS_NONPAGED_POOL)) != 0 {
+        unsafe { (*Mdl).MappedSystemVa }
+    } else {
+        unsafe { MmMapLockedPagesSpecifyCache(Mdl, KernelMode, MmCached, NULL, 0, Priority) }
+    }
+}
+
+#[link_section = ".PAGE"]
 static mut DRIVER_OBJECT: *mut DRIVER_OBJECT = core::ptr::null_mut();
+#[link_section = ".PAGE"]
 static mut FLT_FILTER: PFLT_FILTER = 0;
 
 #[no_mangle]
@@ -147,7 +256,7 @@ fn driver_unload(_: *const u8) -> u32 {
         DbgPrint(b"driver_unload\n\0".as_ptr());
         let status = FltUnregisterFilter(FLT_FILTER);
         DbgPrint(b"FltUnregisterFilter\n\0".as_ptr());
-        core::mem::transmute::<_, extern "C" fn(*const u8, u32)>(DbgPrint as *const u8)(
+        core::mem::transmute::<_, extern "C" fn(*const u8, NTSTATUS)>(DbgPrint as *const u8)(
             b"status: 0x%08x\n\0".as_ptr(),
             status,
         );
@@ -208,49 +317,19 @@ fn post_operation_callback(
     0
 }
 
-// ExInitializeDriverRuntime(
-//     _In_ ULONG RuntimeFlags
-//     )
-//
-// {
-// #if defined(POOL_ZERO_DOWN_LEVEL_SUPPORT) || (POOL_NX_OPTIN && !POOL_NX_OPTOUT)
-//     ULONG BuildNumber;
-//     ULONG MajorVersion;
-//     ULONG MinorVersion;
-//     QuerySystemInformation =
-//         (NT_QUERY_SYSTEM_INFORMATION)MmGetSystemRoutineAddress(&QuerySystemInformationName);
-//     if (QuerySystemInformation != NULL) {
-//         Status = QuerySystemInformation(POOL_ZEROING_INFORMATION,
-//                                         (PVOID)&PoolZeroingInformation,
-//                                         sizeof(SYSTEM_POOL_ZEROING_INFORMATION),
-//                                         NULL);
-//         if ((NT_SUCCESS(Status)) &&
-//             (PoolZeroingInformation.PoolZeroingSupportPresent != FALSE)) {
-//
-//             ExPoolZeroingNativelySupported = TRUE;
-//         }
-//     }
-// #if POOL_NX_OPTIN && !POOL_NX_OPTOUT
-//     if ((RuntimeFlags & DrvRtPoolNxOptIn) != 0) {
-//         if ((MajorVersion > 6) ||
-//             (MajorVersion == 6 &&
-//              MinorVersion >= 2)) {
-//
-//             ExDefaultNonPagedPoolType = NonPagedPoolNx;
-//             ExDefaultMdlProtection = MdlMappingNoExecute;
-//         }
-//     }
-// }
 #[no_mangle]
 #[link_section = ".PAGE"]
 fn ExInitializeDriverRuntime(_RuntimeFlags: ULONG) -> NTSTATUS {
-    panic!("ExInitializeDriverRuntime");
+    unsafe {
+        DbgPrint(b"ExInitializeDriverRuntime\n\0".as_ptr());
+    }
+    0
 }
 
 #[no_mangle]
 #[link_section = ".INIT"]
-fn DriverEntry(driver_object: *mut DRIVER_OBJECT, _: *mut u8) -> u32 {
-    let operation_registration: [FLT_OPERATION_REGISTRATION; 5] = [
+fn DriverEntry(driver_object: *mut DRIVER_OBJECT, _: *mut u8) -> NTSTATUS {
+    let operation_registration: [FLT_OPERATION_REGISTRATION; 4] = [
         FLT_OPERATION_REGISTRATION {
             MajorFunction: IRP_MJ_CREATE as u8,
             Flags: 0,
@@ -272,13 +351,13 @@ fn DriverEntry(driver_object: *mut DRIVER_OBJECT, _: *mut u8) -> u32 {
             PostOperation: None,
             Reserved1: core::ptr::null_mut(),
         },
-        FLT_OPERATION_REGISTRATION {
-            MajorFunction: IRP_MJ_FILE_SYSTEM_CONTROL as u8,
-            Flags: 0,
-            PreOperation: Some(unsafe { core::mem::transmute(pre_fs_control as *const u8) }),
-            PostOperation: None,
-            Reserved1: core::ptr::null_mut(),
-        },
+        // FLT_OPERATION_REGISTRATION {
+        //     MajorFunction: IRP_MJ_FILE_SYSTEM_CONTROL as u8,
+        //     Flags: 0,
+        //     PreOperation: Some(unsafe { core::mem::transmute(pre_fs_control as *const u8) }),
+        //     PostOperation: None,
+        //     Reserved1: core::ptr::null_mut(),
+        // },
         FLT_OPERATION_REGISTRATION {
             MajorFunction: 0x80, // IRP_MJ_OPERATION_END,
             Flags: 0,
@@ -293,7 +372,7 @@ fn DriverEntry(driver_object: *mut DRIVER_OBJECT, _: *mut u8) -> u32 {
             ContextType: FLT_STREAMHANDLE_CONTEXT as u16,
             Flags: 0,
             ContextCleanupCallback: None,
-            Size: core::mem::size_of::<FLT_CONTEXT_REGISTRATION>(),
+            Size: core::mem::size_of::<SCANNER_STREAM_CONTEXT>(),
             PoolTag: u32::from_le_bytes(*b"chBS"),
             ContextAllocateCallback: None,
             ContextFreeCallback: None,
@@ -414,7 +493,7 @@ fn DriverEntry(driver_object: *mut DRIVER_OBJECT, _: *mut u8) -> u32 {
             0,
         );
         DbgPrint(b"ZwCreateFile\n\0".as_ptr());
-        core::mem::transmute::<_, extern "C" fn(*const u8, u32)>(DbgPrint as *const u8)(
+        core::mem::transmute::<_, extern "C" fn(*const u8, NTSTATUS)>(DbgPrint as *const u8)(
             b"status: 0x%08x\n\0".as_ptr(),
             status,
         );
@@ -435,32 +514,25 @@ fn DriverEntry(driver_object: *mut DRIVER_OBJECT, _: *mut u8) -> u32 {
             NULL as *mut ULONG,
         );
         DbgPrint(b"ZwWriteFile\n\0".as_ptr());
-        core::mem::transmute::<_, extern "C" fn(*const u8, u32)>(DbgPrint as *const u8)(
+        core::mem::transmute::<_, extern "C" fn(*const u8, NTSTATUS)>(DbgPrint as *const u8)(
             b"s: 0x%08x\n\0".as_ptr(),
             status,
         );
 
         // return 0;
-        ZwClose(hFile);
+        // ZwClose(hFile);
     }
     let mut registration: FLT_REGISTRATION = filter_registration;
     let mut filter: PFLT_FILTER = 0;
 
-    let resp = ExInitializeDriverRuntime(DrvRtPoolNxOptIn);
-    unsafe {
-        DbgPrint(b"ExInitializeDriverRuntime\n\0".as_ptr());
-        core::mem::transmute::<_, extern "C" fn(*const u8, u32)>(DbgPrint as *const u8)(
-            b"status: 0x%08x\n\0".as_ptr(),
-            resp,
-        );
-    }
+    let mut wait_interval = 0x50000;
 
     let mut status: NTSTATUS =
         unsafe { FltRegisterFilter(driver_object, &mut registration, &mut filter) };
 
     unsafe {
         DbgPrint(b"FltRegisterFilter\n\0".as_ptr());
-        core::mem::transmute::<_, extern "C" fn(*const u8, u32)>(DbgPrint as *const u8)(
+        core::mem::transmute::<_, extern "C" fn(*const u8, NTSTATUS)>(DbgPrint as *const u8)(
             b"status: 0x%08x\n\0".as_ptr(),
             status,
         );
@@ -468,6 +540,8 @@ fn DriverEntry(driver_object: *mut DRIVER_OBJECT, _: *mut u8) -> u32 {
 
     unsafe {
         FLT_FILTER = filter;
+        SERVER_DATA.driver_object = driver_object;
+        SERVER_DATA.filter = filter;
     }
 
     let mut port_name = UNICODE_STRING {
@@ -501,7 +575,7 @@ fn DriverEntry(driver_object: *mut DRIVER_OBJECT, _: *mut u8) -> u32 {
     let resp = unsafe { FltBuildDefaultSecurityDescriptor(&mut security_descriptor, access) };
     unsafe {
         DbgPrint(b"FltBuildDefaultSecurityDescriptor\n\0".as_ptr());
-        core::mem::transmute::<_, extern "C" fn(*const u8, u32)>(DbgPrint as *const u8)(
+        core::mem::transmute::<_, extern "C" fn(*const u8, NTSTATUS)>(DbgPrint as *const u8)(
             b"status: 0x%08x\n\0".as_ptr(),
             resp,
         );
@@ -549,13 +623,13 @@ fn DriverEntry(driver_object: *mut DRIVER_OBJECT, _: *mut u8) -> u32 {
     };
     unsafe {
         DbgPrint(b"FltCreateCommunicationPort\n\0".as_ptr());
-        core::mem::transmute::<_, extern "C" fn(*const u8, u32)>(DbgPrint as *const u8)(
+        core::mem::transmute::<_, extern "C" fn(*const u8, NTSTATUS)>(DbgPrint as *const u8)(
             b"status: 0x%08x\n\0".as_ptr(),
             resp,
         );
     }
 
-    let _ = unsafe { FltFreeSecurityDescriptor(&mut security_descriptor) };
+    //let _ = unsafe { FltFreeSecurityDescriptor(&mut security_descriptor) };
 
     if status == 0 {
         status = unsafe { FltStartFiltering(filter) };
@@ -563,7 +637,7 @@ fn DriverEntry(driver_object: *mut DRIVER_OBJECT, _: *mut u8) -> u32 {
 
     unsafe {
         DbgPrint(b"FltStartFiltering\n\0".as_ptr());
-        core::mem::transmute::<_, extern "C" fn(*const u8, u32)>(DbgPrint as *const u8)(
+        core::mem::transmute::<_, extern "C" fn(*const u8, NTSTATUS)>(DbgPrint as *const u8)(
             b"status: 0x%08x\n\0".as_ptr(),
             status,
         );
