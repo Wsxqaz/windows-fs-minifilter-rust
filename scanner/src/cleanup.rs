@@ -1,6 +1,11 @@
 use crate::bindings::*;
+use crate::logger;
+use crate::logger::dbg_print;
 use crate::port::port_send;
-use crate::{DbgPrint, FltGetStreamHandleContext, SCANNER_STREAM_CONTEXT, SERVER_DATA, FltReleaseContext, FltAllocateContext, FltSetStreamHandleContext, FltCancelFileOpen};
+use crate::{
+    FltAllocateContext, FltCancelFileOpen, FltGetStreamHandleContext, FltReleaseContext,
+    FltSetStreamHandleContext, LOGGING_ENABLED, SCANNER_STREAM_CONTEXT, SERVER_DATA,
+};
 use core::ffi::c_void;
 
 #[no_mangle]
@@ -8,11 +13,9 @@ use core::ffi::c_void;
 pub fn pre_cleanup(
     callback_data: *mut FLT_CALLBACK_DATA,
     related_object: *mut FLT_RELATED_OBJECTS,
-    completion_context: *mut *mut c_void,
+    _completion_context: *mut *mut c_void,
 ) -> NTSTATUS {
-    unsafe {
-        DbgPrint(b"pre_cleanup\0".as_ptr());
-    }
+    dbg_print(logger::LOG_DEBUG, &[b"pre_cleanup"]);
 
     if unsafe { SERVER_DATA.client_port } == 0 {
         return FLT_PREOP_SUCCESS_NO_CALLBACK;
@@ -56,19 +59,18 @@ pub fn pre_cleanup(
                 )
             };
             unsafe {
-                DbgPrint(b"FltAllocateContext\0".as_ptr());
-                core::mem::transmute::<_, extern "C" fn(*const u8, NTSTATUS)>(
-                    DbgPrint as *const u8,
-                )(b"code: %x\0".as_ptr(), status);
-                core::mem::transmute::<_, extern "C" fn(*const u8, usize)>(DbgPrint as *const u8)(
-                    b"p_scan_context: %p\0".as_ptr(),
-                    p_scan_context as _,
+                dbg_print(logger::LOG_DEBUG, &[b"FltAllocateContext"]);
+                dbg_print(logger::LOG_DEBUG, &[b"code: ", &status.to_ne_bytes()]);
+                dbg_print(
+                    logger::LOG_DEBUG,
+                    &[b"p_scan_context: ", &(p_scan_context as u64).to_ne_bytes()],
                 );
-                core::mem::transmute::<_, extern "C" fn(*const u8, PFLT_FILTER)>(
-                    DbgPrint as *const u8,
-                )(
-                    b"SERVER_DATA.filter: %x\0".as_ptr(),
-                    SERVER_DATA.filter as _,
+                dbg_print(
+                    logger::LOG_DEBUG,
+                    &[
+                        b"SERVER_DATA.filter: ",
+                        &(SERVER_DATA.filter as u64).to_ne_bytes(),
+                    ],
                 );
             }
             if p_scan_context.is_null() {
@@ -86,12 +88,8 @@ pub fn pre_cleanup(
                     core::ptr::null_mut(),
                 )
             };
-            unsafe {
-                DbgPrint(b"FltSetStreamHandleContext\0".as_ptr());
-                core::mem::transmute::<_, extern "C" fn(*const u8, NTSTATUS)>(
-                    DbgPrint as *const u8,
-                )(b"code: %x\0".as_ptr(), resp);
-            }
+            dbg_print(logger::LOG_DEBUG, &[b"FltSetStreamHandleContext"]);
+            dbg_print(logger::LOG_DEBUG, &[b"code: ", &resp.to_ne_bytes()]);
             unsafe { FltReleaseContext(p_scan_context as *mut _) };
         }
     }

@@ -20,17 +20,19 @@ fn panic(_panic: &PanicInfo<'_>) -> ! {
 }
 
 mod bindings;
-mod cleanup;
-mod create;
-mod fs_control;
+mod logger;
 mod port;
+// mod cleanup;
+mod create;
+// mod fs_control;
 mod write;
 
 use bindings::*;
-use cleanup::pre_cleanup;
 use create::{post_create, pre_create};
-use fs_control::pre_fs_control;
+use logger::dbg_print;
 use port::{port_connect, port_disconnect};
+// use cleanup::pre_cleanup;
+// use fs_control::pre_fs_control;
 use write::pre_write;
 
 type PVOID = *mut core::ffi::c_void;
@@ -38,6 +40,7 @@ type NTSTATUS = i32;
 type ULONG = u32;
 type LARGE_INTEGER = u64;
 
+const LOGGING_ENABLED: u32 = 0x00000005;
 const DrvRtPoolNxOptIn: u32 = 0x00000001;
 const NULL: PVOID = 0 as PVOID;
 const NULL_HANDLE: HANDLE = 0 as HANDLE;
@@ -65,17 +68,21 @@ pub struct SCANNER_STREAM_CONTEXT {
     rescan_req: u8,
 }
 
+#[repr(C)]
 struct SCANNER_NOTIFICATION {
     bytes_to_scan: u32,
     reserved: u32,
     message: [u8; 1024],
 }
 
+#[repr(C)]
 struct SCANNER_REPLY {
-    replyLength: u32,
+    reply_length: u32,
+    safe_to_open: u32,
     reply: [u8; 1024],
 }
 
+#[repr(C)]
 struct SERVER_DATA {
     client_process: PEPROCESS,
     client_port: PFLT_PORT,
@@ -83,6 +90,7 @@ struct SERVER_DATA {
     filter: PFLT_FILTER,
     server_port: PFLT_PORT,
 }
+
 #[link_section = ".PAGE"]
 static mut SERVER_DATA: SERVER_DATA = SERVER_DATA {
     client_process: 0,
@@ -121,7 +129,7 @@ extern "C" {
     ) -> NTSTATUS;
     pub fn ZwClose(Handle: HANDLE) -> NTSTATUS;
     pub fn DbgPrint(Format: *const u8);
-    pub fn IoGetCurrentProcess() -> PEPROCESS;
+    pub fn PsGetCurrentProcess() -> PEPROCESS;
     pub fn IoThreadToProcess(Thread: PETHREAD) -> PEPROCESS;
     pub fn KeDelayExecutionThread(
         WaitMode: u8,
@@ -137,7 +145,13 @@ extern "C" {
         BugCheckOnFailure: u8,
         Priority: u32,
     ) -> *mut core::ffi::c_void;
-    pub fn RtlCopyMemory(Destination: *mut core::ffi::c_void, Source: *const core::ffi::c_void, Length: usize);
+    pub fn RtlCopyMemory(
+        Destination: *mut core::ffi::c_void,
+        Source: *const core::ffi::c_void,
+        Length: usize,
+    );
+    pub fn ExFreePool(P: *mut core::ffi::c_void);
+    pub fn RtlTimeToTimeFields(Time: *mut u64, TimeFields: *mut TIME_FIELDS);
 }
 
 #[link(name = "fltmgr.sys", modifiers = "+verbatim")]
@@ -150,20 +164,21 @@ extern "C" {
     pub fn FltStartFiltering(Filter: HANDLE) -> NTSTATUS;
     pub fn FltUnregisterFilter(Filter: HANDLE) -> NTSTATUS;
     pub fn FltBuildDefaultSecurityDescriptor(
-        SecurityDescriptor: *mut SECURITY_DESCRIPTOR,
+        SecurityDescriptor: *mut *mut SECURITY_DESCRIPTOR,
         DesiredAccess: u32,
     ) -> NTSTATUS;
-    pub fn FltCreateCommunicationPort(
-        Filter: PFLT_FILTER,
-        ServerPort: *mut PFLT_PORT,
-        ObjectAttributes: *mut OBJECT_ATTRIBUTES,
-        ServerPortCookie: PVOID,
-        ConnectNotifyCallback: *mut core::ffi::c_void,
-        DisconnectNotifyCallback: *mut core::ffi::c_void,
-        MessageNotifyCallback: *mut core::ffi::c_void,
-        MaxConnections: u32,
-    ) -> NTSTATUS;
     pub fn FltFreeSecurityDescriptor(SecurityDescriptor: *mut SECURITY_DESCRIPTOR);
+    pub fn FltCreateCommunicationPort(
+        filter: PFLT_FILTER,
+        serverport: *mut PFLT_PORT,
+        objectattributes: *const OBJECT_ATTRIBUTES,
+        serverportcookie: *const core::ffi::c_void,
+        connectnotifycallback: PFLT_CONNECT_NOTIFY,
+        disconnectnotifycallback: PFLT_DISCONNECT_NOTIFY,
+        messagenotifycallback: PFLT_MESSAGE_NOTIFY,
+        maxconnections: i32,
+    ) -> NTSTATUS;
+    pub fn FltCloseCommunicationPort(port: PFLT_PORT);
     pub fn FltGetFileNameInformation(
         Data: *mut FLT_CALLBACK_DATA,
         NameOptions: u32,
@@ -225,19 +240,15 @@ extern "C" {
         ReceiverBufferLength: *mut ULONG,
         Timeout: *mut u64,
     ) -> NTSTATUS;
-
 }
 
 #[link_section = ".PAGE"]
-pub fn MmGetSystemAddressForMdlSafe(
-    Mdl: *mut MDL,
-    Priority: u32,
-) -> *mut core::ffi::c_void {
+pub fn MmGetSystemAddressForMdlSafe(Mdl: *mut MDL, Priority: u32) -> *mut core::ffi::c_void {
     let mdl_flags = unsafe { (*Mdl).MdlFlags };
     let MDL_MAPPED_TO_SYSTEM_VA = 0x0001;
     let MDL_SOURCE_IS_NONPAGED_POOL = 0x0002;
 
-    if (unsafe { (*Mdl).MdlFlags } & (MDL_MAPPED_TO_SYSTEM_VA | MDL_SOURCE_IS_NONPAGED_POOL)) != 0 {
+    if (mdl_flags & (MDL_MAPPED_TO_SYSTEM_VA | MDL_SOURCE_IS_NONPAGED_POOL)) != 0 {
         unsafe { (*Mdl).MappedSystemVa }
     } else {
         unsafe { MmMapLockedPagesSpecifyCache(Mdl, KernelMode, MmCached, NULL, 0, Priority) }
@@ -253,75 +264,11 @@ static mut FLT_FILTER: PFLT_FILTER = 0;
 #[link_section = ".PAGE"]
 fn driver_unload(_: *const u8) -> u32 {
     unsafe {
-        DbgPrint(b"driver_unload\n\0".as_ptr());
-        let status = FltUnregisterFilter(FLT_FILTER);
-        DbgPrint(b"FltUnregisterFilter\n\0".as_ptr());
-        core::mem::transmute::<_, extern "C" fn(*const u8, NTSTATUS)>(DbgPrint as *const u8)(
-            b"status: 0x%08x\n\0".as_ptr(),
-            status,
-        );
-    }
-    0
-}
-
-#[no_mangle]
-#[link_section = ".PAGE"]
-fn driver_query_teardown(_: *const u8) -> u32 {
-    unsafe {
-        DbgPrint(b"driver_query_teardown\n\0".as_ptr());
-    }
-    0
-}
-
-#[no_mangle]
-#[link_section = ".PAGE"]
-fn pre_operation_callback(
-    cbd: *mut FLT_CALLBACK_DATA,
-    _: *mut FLT_RELATED_OBJECTS,
-    _: *mut core::ffi::c_void,
-) -> FLT_PREOP_CALLBACK_STATUS {
-    unsafe {
-        DbgPrint(b"pre_operation_callback\n\0".as_ptr());
-        core::mem::transmute::<_, extern "C" fn(*const u8, *mut FILE_OBJECT)>(DbgPrint as *mut u8)(
-            b"FileObject: 0x%08x\n\0".as_ptr(),
-            (*(*cbd).Iopb).TargetFileObject,
-        );
-
-        let file_name_length = (*(*(*cbd).Iopb).TargetFileObject).FileName.Length;
-        core::mem::transmute::<_, extern "C" fn(*const u8, u16)>(DbgPrint as *mut u8)(
-            b"FileName.Length: %d\n\0".as_ptr(),
-            file_name_length,
-        );
-        core::mem::transmute::<_, extern "C" fn(*const u8, &mut crate::bindings::UNICODE_STRING)>(
-            DbgPrint as *mut u8,
-        )(
-            b"FileName: %wZ\n\0".as_ptr(),
-            &mut (*(*(*cbd).Iopb).TargetFileObject).FileName,
-        );
-    }
-    FLT_PREOP_SUCCESS_NO_CALLBACK
-}
-
-#[no_mangle]
-#[link_section = ".PAGE"]
-fn post_operation_callback(
-    _: *mut FLT_CALLBACK_DATA,
-    _: *mut FLT_RELATED_OBJECTS,
-    _: *mut core::ffi::c_void,
-    _: FLT_POSTOP_CALLBACK_STATUS,
-) -> u32 {
-    unsafe {
-        DbgPrint(b"post_operation_callback\n\0".as_ptr());
-    }
-
-    0
-}
-
-#[no_mangle]
-#[link_section = ".PAGE"]
-fn ExInitializeDriverRuntime(_RuntimeFlags: ULONG) -> NTSTATUS {
-    unsafe {
-        DbgPrint(b"ExInitializeDriverRuntime\n\0".as_ptr());
+        dbg_print(logger::LOG_DEBUG, &[b"driver_unload"], None);
+        FltCloseCommunicationPort(SERVER_DATA.server_port);
+        dbg_print(logger::LOG_DEBUG, &[b"FltCloseCommunicationPort"], None);
+        FltUnregisterFilter(FLT_FILTER);
+        dbg_print(logger::LOG_DEBUG, &[b"FltUnregisterFilter"], None);
     }
     0
 }
@@ -329,21 +276,22 @@ fn ExInitializeDriverRuntime(_RuntimeFlags: ULONG) -> NTSTATUS {
 #[no_mangle]
 #[link_section = ".INIT"]
 fn DriverEntry(driver_object: *mut DRIVER_OBJECT, _: *mut u8) -> NTSTATUS {
-    let operation_registration: [FLT_OPERATION_REGISTRATION; 4] = [
-        FLT_OPERATION_REGISTRATION {
-            MajorFunction: IRP_MJ_CREATE as u8,
-            Flags: 0,
-            PreOperation: Some(unsafe { core::mem::transmute(pre_create as *const u8) }),
-            PostOperation: Some(unsafe { core::mem::transmute(post_create as *const u8) }),
-            Reserved1: core::ptr::null_mut(),
-        },
-        FLT_OPERATION_REGISTRATION {
-            MajorFunction: IRP_MJ_CLEANUP as u8,
-            Flags: 0,
-            PreOperation: Some(unsafe { core::mem::transmute(pre_cleanup as *const u8) }),
-            PostOperation: None,
-            Reserved1: core::ptr::null_mut(),
-        },
+    let operation_registration: [FLT_OPERATION_REGISTRATION; 2] = [
+        // FLT_OPERATION_REGISTRATION {
+        //     MajorFunction: IRP_MJ_CREATE as u8,
+        //     Flags: 0,
+        //     PreOperation: Some(unsafe { core::mem::transmute(pre_create as *const u8) }),
+        //     PostOperation: None,
+        //     // PostOperation: Some(unsafe { core::mem::transmute(post_create as *const u8) }),
+        //     Reserved1: core::ptr::null_mut(),
+        // },
+        // FLT_OPERATION_REGISTRATION {
+        //     MajorFunction: IRP_MJ_CLEANUP as u8,
+        //     Flags: 0,
+        //     PreOperation: Some(unsafe { core::mem::transmute(pre_cleanup as *const u8) }),
+        //     PostOperation: None,
+        //     Reserved1: core::ptr::null_mut(),
+        // },
         FLT_OPERATION_REGISTRATION {
             MajorFunction: IRP_MJ_WRITE as u8,
             Flags: 0,
@@ -398,9 +346,7 @@ fn DriverEntry(driver_object: *mut DRIVER_OBJECT, _: *mut u8) -> NTSTATUS {
         OperationRegistration: operation_registration.as_ptr(),
         FilterUnloadCallback: Some(unsafe { core::mem::transmute(driver_unload as *const u8) }),
         InstanceSetupCallback: None,
-        InstanceQueryTeardownCallback: Some(unsafe {
-            core::mem::transmute(driver_query_teardown as *const u8)
-        }),
+        InstanceQueryTeardownCallback: None,
         InstanceTeardownStartCallback: None,
         InstanceTeardownCompleteCallback: None,
         GenerateFileNameCallback: None,
@@ -413,130 +359,21 @@ fn DriverEntry(driver_object: *mut DRIVER_OBJECT, _: *mut u8) -> NTSTATUS {
 
     unsafe {
         DRIVER_OBJECT = driver_object;
-        DbgPrint(b"DriverEntry\n\0".as_ptr());
     }
+    dbg_print(logger::LOG_DEBUG, &[b"DriverEntry"], None);
 
-    let mut buffer: [u32; 4] = [0x00, 0x01, 0x02, 0x03];
-    let bufferSize: ULONG = 4 as ULONG;
-
-    let mut filePath = UNICODE_STRING {
-        Length: 0,
-        MaximumLength: 0,
-        Buffer: 0 as *mut u16,
-    };
-
-    unsafe {
-        RtlInitUnicodeString(
-            &mut filePath,
-            [
-                0x5c, 0x3f, 0x3f, 0x5c, 0x43, 0x3a, 0x5c, 0x6c, 0x6f, 0x67, 0x2e, 0x74, 0x78, 0x74,
-                0,
-            ]
-            .as_ptr(), // "\\??\\C:\\log.txt"
-        );
-        DbgPrint(b"RtlInitUnicodeString\n\0".as_ptr());
-    }
-
-    let mut hFile: HANDLE = 0 as HANDLE;
-    let mut ObjectAttributes = OBJECT_ATTRIBUTES {
-        Length: 0,
-        RootDirectory: 0 as HANDLE,
-        ObjectName: &mut filePath,
-        Attributes: 0,
-        SecurityDescriptor: 0 as PVOID,
-        SecurityQualityOfService: 0 as PVOID,
-    };
-    let mut IoStatusBlock = IO_STATUS_BLOCK {
-        Anonymous: IO_STATUS_BLOCK_0 { Status: 0 },
-        Information: 0,
-    };
-
-    let obj_case_insensitive = 0x00000040;
-    let obj_kernel_handle = 0x00000200;
-    unsafe {
-        InitializeObjectAttributes(
-            &mut ObjectAttributes,
-            &mut filePath,
-            obj_case_insensitive | obj_kernel_handle,
-            NULL_HANDLE,
-            NULL,
-        );
-
-        DbgPrint(b"InitializeObjectAttributes\n\0".as_ptr());
-        DbgPrint(b"ObjectAttributes\n\0".as_ptr());
-
-        core::mem::transmute::<_, extern "C" fn(*const u8, u32)>(DbgPrint as *const u8)(
-            b"ObjectAttributes.Length: %d\n\0".as_ptr(),
-            ObjectAttributes.Length,
-        );
-    }
-
-    let file_create = 0x00000002;
-    let file_attribute_normal = 0x00000080;
-    let file_synchronous_io_nonalert = 0x00000020;
-    let file_generic_read = (0x00020000) | (0x0001) | (0x0080) | (0x0008) | (0x00100000);
-    let file_generic_write =
-        (0x00020000) | (0x0002) | (0x0100) | (0x0010) | (0x0004) | (0x00100000);
-
-    unsafe {
-        let status = ZwCreateFile(
-            &mut hFile,
-            file_generic_read | file_generic_write,
-            &mut ObjectAttributes,
-            &mut IoStatusBlock,
-            NULL,
-            file_attribute_normal,
-            0,
-            file_create,
-            file_synchronous_io_nonalert,
-            NULL_HANDLE,
-            0,
-        );
-        DbgPrint(b"ZwCreateFile\n\0".as_ptr());
-        core::mem::transmute::<_, extern "C" fn(*const u8, NTSTATUS)>(DbgPrint as *const u8)(
-            b"status: 0x%08x\n\0".as_ptr(),
-            status,
-        );
-        // status: -1073741811
-        let mut IoStatusBlock = IO_STATUS_BLOCK {
-            Anonymous: IO_STATUS_BLOCK_0 { Status: 0 },
-            Information: 0,
-        };
-        ZwWriteFile(
-            hFile,
-            NULL_HANDLE,
-            NULL_HANDLE,
-            NULL_HANDLE,
-            &mut IoStatusBlock,
-            buffer.as_mut_ptr() as *mut core::ffi::c_void,
-            bufferSize,
-            NULL,
-            NULL as *mut ULONG,
-        );
-        DbgPrint(b"ZwWriteFile\n\0".as_ptr());
-        core::mem::transmute::<_, extern "C" fn(*const u8, NTSTATUS)>(DbgPrint as *const u8)(
-            b"s: 0x%08x\n\0".as_ptr(),
-            status,
-        );
-
-        // return 0;
-        // ZwClose(hFile);
-    }
     let mut registration: FLT_REGISTRATION = filter_registration;
     let mut filter: PFLT_FILTER = 0;
-
-    let mut wait_interval = 0x50000;
 
     let mut status: NTSTATUS =
         unsafe { FltRegisterFilter(driver_object, &mut registration, &mut filter) };
 
-    unsafe {
-        DbgPrint(b"FltRegisterFilter\n\0".as_ptr());
-        core::mem::transmute::<_, extern "C" fn(*const u8, NTSTATUS)>(DbgPrint as *const u8)(
-            b"status: 0x%08x\n\0".as_ptr(),
-            status,
-        );
-    }
+    dbg_print(logger::LOG_DEBUG, &[b"FltRegisterFilter"], None);
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[b"status: ", status.to_le_bytes().as_ref()],
+        None,
+    );
 
     unsafe {
         FLT_FILTER = filter;
@@ -549,85 +386,227 @@ fn DriverEntry(driver_object: *mut DRIVER_OBJECT, _: *mut u8) -> NTSTATUS {
         MaximumLength: 0,
         Buffer: 0 as *mut u16,
     };
-    let _ = unsafe {
+    let portname = [92, 83, 99, 97, 110, 110, 101, 114, 80, 111, 114, 116, 0];
+    unsafe {
         RtlInitUnicodeString(
             &mut port_name,
-            [
-                0x5c, 0x3f, 0x3f, 0x5c, 0x4c, 0x6f, 0x63, 0x61, 0x6c, 0x48, 0x6f, 0x73, 0x74, 0, 0,
-            ]
-            .as_ptr(), // "\\??\\LocalHost"
+            portname.as_ptr(), // \ScannerPort
         )
     };
-    unsafe {
-        DbgPrint(b"RtlInitUnicodeString\n\0".as_ptr());
-    }
-
-    let mut security_descriptor = SECURITY_DESCRIPTOR {
-        Revision: 1,
-        Sbz1: 0,
-        Control: 0,
-        Owner: NULL,
-        Group: NULL,
-        Sacl: NULL as _,
-        Dacl: NULL as _,
-    };
+    dbg_print(logger::LOG_DEBUG, &[b"RtlInitUnicodeString"], None);
+    let mut p_security_descriptor: *mut SECURITY_DESCRIPTOR = core::ptr::null_mut();
     let access = (0x0001 | 0x001f0000) as u32; // FLT_PORT_CONNECT | STANDARD_RIGHTS_ALL
-    let resp = unsafe { FltBuildDefaultSecurityDescriptor(&mut security_descriptor, access) };
-    unsafe {
-        DbgPrint(b"FltBuildDefaultSecurityDescriptor\n\0".as_ptr());
-        core::mem::transmute::<_, extern "C" fn(*const u8, NTSTATUS)>(DbgPrint as *const u8)(
-            b"status: 0x%08x\n\0".as_ptr(),
-            resp,
-        );
-    }
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[b"FltBuildDefaultSecurityDescriptor"],
+        None,
+    );
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[b"access: ", access.to_be_bytes().as_ref()],
+        None,
+    );
+    let resp = unsafe { FltBuildDefaultSecurityDescriptor(&mut p_security_descriptor, access) };
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[b"FltBuildDefaultSecurityDescriptor"],
+        None,
+    );
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[b"status: ", resp.to_le_bytes().as_ref()],
+        None,
+    );
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[
+            b"p_security_descriptor",
+            (p_security_descriptor as u64).to_be_bytes().as_ref(),
+        ],
+        None,
+    );
+    // dbg_print(logger::LOG_DEBUG, &[b"revision: ", ((unsafe { *p_security_descriptor }).Revision as u64).to_be_bytes().as_ref()]);
 
-    let mut ObjectAttributes = OBJECT_ATTRIBUTES {
+    let mut object_attributes = OBJECT_ATTRIBUTES {
         Length: 0,
         RootDirectory: 0 as HANDLE,
         ObjectName: &mut port_name,
         Attributes: 0,
-        SecurityDescriptor: 0 as PVOID,
+        SecurityDescriptor: p_security_descriptor as PVOID,
         SecurityQualityOfService: 0 as PVOID,
     };
 
     let obj_case_insensitive = 0x00000040;
     let obj_kernel_handle = 0x00000200;
-    unsafe {
-        InitializeObjectAttributes(
-            &mut ObjectAttributes,
-            &mut filePath,
-            obj_case_insensitive | obj_kernel_handle,
-            NULL_HANDLE,
-            NULL,
-        );
-
-        DbgPrint(b"InitializeObjectAttributes\n\0".as_ptr());
-
-        core::mem::transmute::<_, extern "C" fn(*const u8, u32)>(DbgPrint as *const u8)(
-            b"ObjectAttributes.Length: %d\n\0".as_ptr(),
-            ObjectAttributes.Length,
-        );
-    }
+    InitializeObjectAttributes(
+        &mut object_attributes,
+        &mut port_name,
+        obj_case_insensitive | obj_kernel_handle,
+        NULL_HANDLE,
+        p_security_descriptor as *mut _,
+    );
+    dbg_print(logger::LOG_DEBUG, &[b"InitializeObjectAttributes"], None);
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[
+            b"ObjectAttributes.SecurityDescriptor.Revision: ",
+            (unsafe { *(object_attributes.SecurityDescriptor as *mut SECURITY_DESCRIPTOR) })
+                .Revision
+                .to_be_bytes()
+                .as_ref(),
+        ],
+        None,
+    );
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[
+            b"ObjectAttributes.SecurityDescriptor.Sbz1: ",
+            (unsafe { *(object_attributes.SecurityDescriptor as *mut SECURITY_DESCRIPTOR) })
+                .Sbz1
+                .to_be_bytes()
+                .as_ref(),
+        ],
+        None,
+    );
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[
+            b"ObjectAttributes.SecurityDescriptor.Control: ",
+            (unsafe { *(object_attributes.SecurityDescriptor as *mut SECURITY_DESCRIPTOR) })
+                .Control
+                .to_be_bytes()
+                .as_ref(),
+        ],
+        None,
+    );
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[
+            b"ObjectAttributes.SecurityDescriptor.Owner: ",
+            ((unsafe { *(object_attributes.SecurityDescriptor as *mut SECURITY_DESCRIPTOR) }).Owner
+                as u64)
+                .to_be_bytes()
+                .as_ref(),
+        ],
+        None,
+    );
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[
+            b"ObjectAttributes.SecurityDescriptor.Group: ",
+            ((unsafe { *(object_attributes.SecurityDescriptor as *mut SECURITY_DESCRIPTOR) }).Group
+                as u64)
+                .to_be_bytes()
+                .as_ref(),
+        ],
+        None,
+    );
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[
+            b"ObjectAttributes.SecurityDescriptor.Sacl: ",
+            ((unsafe { *(object_attributes.SecurityDescriptor as *mut SECURITY_DESCRIPTOR) }).Sacl
+                as u64)
+                .to_be_bytes()
+                .as_ref(),
+        ],
+        None,
+    );
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[
+            b"ObjectAttributes.SecurityDescriptor.Dacl: ",
+            ((unsafe { *(object_attributes.SecurityDescriptor as *mut SECURITY_DESCRIPTOR) }).Dacl
+                as u64)
+                .to_be_bytes()
+                .as_ref(),
+        ],
+        None,
+    );
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[
+            b"ObjectAttributes.Length: ",
+            object_attributes.Length.to_be_bytes().as_ref(),
+        ],
+        None,
+    );
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[
+            b"ObjectAttributes.ObjectName.Length: ",
+            unsafe { (*object_attributes.ObjectName) }
+                .Length
+                .to_be_bytes()
+                .as_ref(),
+        ],
+        None,
+    );
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[
+            b"ObjectAttributes.ObjectName.MaximumLength: ",
+            unsafe { (*object_attributes.ObjectName) }
+                .MaximumLength
+                .to_be_bytes()
+                .as_ref(),
+        ],
+        None,
+    );
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[b"ObjectAttributes.ObjectName: ", unsafe {
+            core::slice::from_raw_parts(
+                (*object_attributes.ObjectName).Buffer as *const u8,
+                ((*object_attributes.ObjectName).Length) as usize,
+            )
+        }],
+        None,
+    );
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[
+            b"ObjectAttributes.Attributes: ",
+            object_attributes.Attributes.to_be_bytes().as_ref(),
+        ],
+        None,
+    );
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[
+            b"ObjectAttributes.RootDirectory: ",
+            object_attributes.RootDirectory.to_be_bytes().as_ref(),
+        ],
+        None,
+    );
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[
+            b"ObjectAttributes.SecurityQualityOfService: ",
+            (object_attributes.SecurityQualityOfService as u64)
+                .to_be_bytes()
+                .as_ref(),
+        ],
+        None,
+    );
 
     let resp = unsafe {
         FltCreateCommunicationPort(
             filter,
             &mut SERVER_DATA.server_port,
-            &mut ObjectAttributes,
+            &mut object_attributes,
             NULL,
-            port_connect as *mut core::ffi::c_void,
-            port_disconnect as *mut core::ffi::c_void,
-            core::ptr::null_mut(),
+            Some(port_connect),
+            Some(port_disconnect),
+            None,
             1,
         )
     };
-    unsafe {
-        DbgPrint(b"FltCreateCommunicationPort\n\0".as_ptr());
-        core::mem::transmute::<_, extern "C" fn(*const u8, NTSTATUS)>(DbgPrint as *const u8)(
-            b"status: 0x%08x\n\0".as_ptr(),
-            resp,
-        );
-    }
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[b"FltCreateCommunicationPort: ", resp.to_ne_bytes().as_ref()],
+        None,
+    );
 
     //let _ = unsafe { FltFreeSecurityDescriptor(&mut security_descriptor) };
 
@@ -635,13 +614,11 @@ fn DriverEntry(driver_object: *mut DRIVER_OBJECT, _: *mut u8) -> NTSTATUS {
         status = unsafe { FltStartFiltering(filter) };
     }
 
-    unsafe {
-        DbgPrint(b"FltStartFiltering\n\0".as_ptr());
-        core::mem::transmute::<_, extern "C" fn(*const u8, NTSTATUS)>(DbgPrint as *const u8)(
-            b"status: 0x%08x\n\0".as_ptr(),
-            status,
-        );
-    }
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[b"FltStartFiltering: ", status.to_ne_bytes().as_ref()],
+        None,
+    );
 
     status
 }

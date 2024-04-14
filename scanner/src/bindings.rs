@@ -3571,6 +3571,15 @@ impl Clone for OWNER_ENTRY_0_0 {
 }
 pub type PEPROCESS = isize;
 pub type PETHREAD = isize;
+pub type PFLT_CONNECT_NOTIFY = Option<
+    unsafe extern "system" fn(
+        clientport: PFLT_PORT,
+        serverportcookie: *const core::ffi::c_void,
+        connectioncontext: *const core::ffi::c_void,
+        sizeofcontext: u32,
+        connectionportcookie: *mut *mut core::ffi::c_void,
+    ) -> NTSTATUS,
+>;
 pub type PFLT_CONTEXT = *mut core::ffi::c_void;
 pub type PFLT_CONTEXT_ALLOCATE_CALLBACK = Option<
     unsafe extern "system" fn(
@@ -3583,6 +3592,8 @@ pub type PFLT_CONTEXT_CLEANUP_CALLBACK =
     Option<unsafe extern "system" fn(context: PFLT_CONTEXT, contexttype: u16)>;
 pub type PFLT_CONTEXT_FREE_CALLBACK =
     Option<unsafe extern "system" fn(pool: *const core::ffi::c_void, contexttype: u16)>;
+pub type PFLT_DISCONNECT_NOTIFY =
+    Option<unsafe extern "system" fn(connectioncookie: *const core::ffi::c_void)>;
 pub type PFLT_FILTER = isize;
 pub type PFLT_FILTER_UNLOAD_CALLBACK = Option<unsafe extern "system" fn(flags: u32) -> NTSTATUS>;
 pub type PFLT_GENERATE_FILE_NAME = Option<
@@ -3609,6 +3620,16 @@ pub type PFLT_INSTANCE_SETUP_CALLBACK = Option<
 >;
 pub type PFLT_INSTANCE_TEARDOWN_CALLBACK =
     Option<unsafe extern "system" fn(fltobjects: *const FLT_RELATED_OBJECTS, reason: u32)>;
+pub type PFLT_MESSAGE_NOTIFY = Option<
+    unsafe extern "system" fn(
+        portcookie: *const core::ffi::c_void,
+        inputbuffer: *const core::ffi::c_void,
+        inputbufferlength: u32,
+        outputbuffer: *mut core::ffi::c_void,
+        outputbufferlength: u32,
+        returnoutputbufferlength: *mut u32,
+    ) -> NTSTATUS,
+>;
 pub type PFLT_NORMALIZE_CONTEXT_CLEANUP =
     Option<unsafe extern "system" fn(normalizationcontext: *const *const core::ffi::c_void)>;
 pub type PFLT_NORMALIZE_NAME_COMPONENT = Option<
@@ -3841,6 +3862,23 @@ pub struct SYSTEM_POWER_STATE_CONTEXT_0_0 {
 }
 impl Copy for SYSTEM_POWER_STATE_CONTEXT_0_0 {}
 impl Clone for SYSTEM_POWER_STATE_CONTEXT_0_0 {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+#[repr(C)]
+pub struct TIME_FIELDS {
+    pub Year: i16,
+    pub Month: i16,
+    pub Day: i16,
+    pub Hour: i16,
+    pub Minute: i16,
+    pub Second: i16,
+    pub Milliseconds: i16,
+    pub Weekday: i16,
+}
+impl Copy for TIME_FIELDS {}
+impl Clone for TIME_FIELDS {
     fn clone(&self) -> Self {
         *self
     }

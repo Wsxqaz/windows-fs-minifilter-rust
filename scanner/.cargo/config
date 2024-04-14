@@ -14,6 +14,7 @@ rustflags = [
     "-C", "link-arg=-Wl,-e,DriverEntry",
     "-C", "link-arg=-Wl,--gc-sections",
     "-C", "link-arg=-Wl,--strip-all",
+    "-C", "link-arg=-Wl,--allow-multiple-definition",
     "-C", "strip=symbols",
     "-C", "link-arg=-DDBG",
 ]

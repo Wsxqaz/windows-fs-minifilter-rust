@@ -1,47 +1,57 @@
 use crate::bindings::*;
+use crate::logger;
+use crate::logger::dbg_print;
 use crate::{
-    DbgPrint, ExAllocatePool, FltAllocatePoolAlignedWithTag, FltGetVolumeFromInstance,
-    FltGetVolumeProperties, FltReadFile, FltSetStreamHandleContext, IoGetCurrentProcess, PVOID,
-    SCANNER_NOTIFICATION, SERVER_DATA, ULONG,
+    ExAllocatePool, FltAllocatePoolAlignedWithTag, FltGetVolumeFromInstance,
+    FltGetVolumeProperties, FltReadFile, FltSetStreamHandleContext, PsGetCurrentProcess,
+    LOGGING_ENABLED, PVOID, SCANNER_NOTIFICATION, SERVER_DATA, ULONG,
 };
+use core::ffi::c_void;
 
 #[no_mangle]
 #[link_section = ".PAGE"]
 pub fn port_init() {
-    unsafe {
-        DbgPrint(b"port_init\0".as_ptr());
-    }
+    dbg_print(logger::LOG_DEBUG, &[b"port_unit"], None);
 }
 
 #[no_mangle]
 #[link_section = ".PAGE"]
-pub fn port_connect(
+pub unsafe extern "system" fn port_connect(
     port: PFLT_PORT,
-    _cookie: PVOID,
-    _context: PVOID,
+    _cookie: *const c_void,
+    _context: *const c_void,
     _size: ULONG,
-    _port_context: PVOID,
-) {
+    _port_context: *mut PVOID,
+) -> NTSTATUS {
+    dbg_print(logger::LOG_DEBUG, &[b"port_connect"], None);
     unsafe {
-        DbgPrint(b"port_connect\0".as_ptr());
-        SERVER_DATA.client_process = IoGetCurrentProcess();
+        SERVER_DATA.client_process = PsGetCurrentProcess();
         SERVER_DATA.client_port = port;
-        core::mem::transmute::<_, extern "C" fn(*const u8, isize)>(DbgPrint as *const u8)(
-            b"client_process: %p\n\0".as_ptr(),
-            SERVER_DATA.client_process,
+        dbg_print(
+            logger::LOG_DEBUG,
+            &[
+                b"port_connect: client_process: ",
+                (SERVER_DATA.client_process as usize).to_be_bytes().as_ref(),
+            ],
+            None,
         );
-        core::mem::transmute::<_, extern "C" fn(*const u8, isize)>(DbgPrint as *const u8)(
-            b"client_port: %p\n\0".as_ptr(),
-            SERVER_DATA.client_port,
+        dbg_print(
+            logger::LOG_DEBUG,
+            &[
+                b"port_connect: client_port: ",
+                (SERVER_DATA.client_port as usize).to_be_bytes().as_ref(),
+            ],
+            None,
         );
     }
+    0
 }
 
 #[no_mangle]
 #[link_section = ".PAGE"]
-pub fn port_disconnect(_port_context: PVOID) {
+pub unsafe extern "system" fn port_disconnect(_port_context: *const c_void) {
     unsafe {
-        DbgPrint(b"port_disconnect\0".as_ptr());
+        dbg_print(logger::LOG_DEBUG, &[b"port_disconnect"], None);
         SERVER_DATA.client_process = 0;
         SERVER_DATA.client_port = 0;
     }
@@ -50,22 +60,21 @@ pub fn port_disconnect(_port_context: PVOID) {
 #[no_mangle]
 #[link_section = ".PAGE"]
 pub fn port_send(instance: PFLT_INSTANCE, file_object: *mut FILE_OBJECT, safe_to_open: *mut bool) {
-    unsafe {
-        DbgPrint(b"port_send\0".as_ptr());
-    }
+    dbg_print(logger::LOG_DEBUG, &[b"port_send"], None);
 
     let scanner_notification: SCANNER_NOTIFICATION = unsafe { core::mem::zeroed() };
     let mut volume: PFLT_VOLUME = unsafe { core::mem::zeroed() };
 
     let status = unsafe { FltGetVolumeFromInstance(instance, &mut volume) };
 
-    unsafe {
-        DbgPrint(b"FltGetVolumeFromInstance\0".as_ptr());
-        core::mem::transmute::<_, extern "C" fn(*const u8, NTSTATUS)>(DbgPrint as *const u8)(
-            b"status: %p\n\0".as_ptr(),
-            status,
-        );
-    }
+    dbg_print(
+        logger::LOG_DEBUG,
+        &[
+            b"FltGetVolumeFromInstance: status: ",
+            status.to_be_bytes().as_ref(),
+        ],
+        None,
+    );
 
     if status < 0 {
         return;
@@ -77,14 +86,6 @@ pub fn port_send(instance: PFLT_INSTANCE, file_object: *mut FILE_OBJECT, safe_to
     let status = unsafe {
         FltGetVolumeProperties(volume, &mut volume_properties, size, &mut returned_length)
     };
-
-    unsafe {
-        DbgPrint(b"FltGetVolumeProperties\0".as_ptr());
-        core::mem::transmute::<_, extern "C" fn(*const u8, NTSTATUS)>(DbgPrint as *const u8)(
-            b"status: %p\n\0".as_ptr(),
-            status,
-        );
-    }
 
     if status < 0 {
         return;
@@ -118,12 +119,4 @@ pub fn port_send(instance: PFLT_INSTANCE, file_object: *mut FILE_OBJECT, safe_to
             core::ptr::null_mut(),
         )
     };
-
-    unsafe {
-        DbgPrint(b"FltReadFile\0".as_ptr());
-        core::mem::transmute::<_, extern "C" fn(*const u8, NTSTATUS)>(DbgPrint as *const u8)(
-            b"status: %p\n\0".as_ptr(),
-            status,
-        );
-    }
 }

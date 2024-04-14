@@ -9,6 +9,8 @@ fn main() {
         "--config",
         "no-inner-attributes",
         "--filter",
+        "Windows.Wdk.System.SystemServices.TIME_FIELDS",
+        "--filter",
         "Windows.Wdk.System.SystemServices.MmCached",
         "--filter",
         "Windows.Wdk.System.SystemServices.KernelMode",
